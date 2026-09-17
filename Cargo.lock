@@ -3021,7 +3021,10 @@ version = "0.1.0"
 dependencies = [
  "alloy",
  "anyhow",
+ "base64 0.22.1",
  "bigdecimal",
+ "borsh",
+ "bs58",
  "chrono",
  "dotenvy",
  "ethnum",
@@ -3033,6 +3036,7 @@ dependencies = [
  "reqwest 0.12.23",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sqlx",
  "thiserror 1.0.69",
  "tiny-keccak",

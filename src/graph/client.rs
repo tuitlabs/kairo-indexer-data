@@ -155,6 +155,27 @@ impl Neo4jClient {
         Ok(())
     }
 
+    /// Delete a direct peer-to-peer RING_EDGE (used when an edge transitions to the Public tier)
+    pub async fn delete_ring_edge(
+        &self,
+        from_agent: &str,
+        to_agent: &str,
+        source_id: &str,
+    ) -> Result<()> {
+        let q = query(
+            "MATCH (from:Agent { address: $from_address })-[r:RING_EDGE { source_id: $source_id }]->(to:Agent { address: $to_address }) \
+             DELETE r"
+        )
+        .param("from_address", from_agent.to_lowercase())
+        .param("to_address", to_agent.to_lowercase())
+        .param("source_id", source_id);
+
+        self.graph.run(q).await
+            .map_err(|e| IndexerError::Database(format!("Neo4j delete_ring_edge failed: {}", e)))?;
+
+        Ok(())
+    }
+
     /// Materialize pairwise peer edges for a coalition (bounded by MAX_COALITION_MATERIALIZE_MEMBERS)
     pub async fn materialize_coalition_peer_edges(
         &self,
