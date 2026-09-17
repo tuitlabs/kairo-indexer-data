@@ -1,0 +1,25 @@
+[package]
+name = "kairo-indexer-data"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "=1.49.0", features = ["full"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+ethnum = { version = "=1.5.3", features = ["serde"] }
+tiny-keccak = { version = "=2.0.2", features = ["keccak"] }
+hex = "=0.4.3"
+chrono = { version = "=0.4.45", features = ["serde"] }
+num-bigint = { version = "=0.4.8", features = ["serde"] }
+anyhow = "=1.0.104"
+thiserror = "=1.0.69"
+dotenvy = "=0.15.7"
+reqwest = { version = "=0.12.23", features = ["json"] }
+native-tls = "=0.2.14"
+tokio-native-tls = "=0.3.1"
+alloy = { version = "2.4.2", features = ["full"] }
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "postgres", "chrono", "bigdecimal", "macros", "migrate"] }
+bigdecimal = "=0.4.10"
+futures-util = "=0.3.34"
+neo4rs = "0.8.0"
