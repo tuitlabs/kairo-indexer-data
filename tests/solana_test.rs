@@ -4,7 +4,8 @@ use sha2::{Digest, Sha256};
 use kairo_indexer_data::db::Database;
 use kairo_indexer_data::solana::{
     SocialEdge, RingTier, BanterMarket, BanterMarketStatus,
-    BanterBetPlaced, SolanaProcessor, SOLANA_INTERNAL_CHAIN_ID,
+    BanterBetPlaced, SolanaProcessor, GeyserClient, GeyserConfig,
+    SOLANA_INTERNAL_CHAIN_ID, SolanaError,
 };
 
 #[test]
@@ -26,6 +27,26 @@ fn test_anchor_discriminators() {
     h3.update(b"event:BanterBetPlaced");
     let res3 = h3.finalize();
     assert_eq!(BanterBetPlaced::discriminator(), res3[..8]);
+}
+
+#[test]
+fn test_banter_market_status_error_on_invalid_byte() {
+    assert_eq!(BanterMarketStatus::from_u8(0).unwrap(), BanterMarketStatus::Active);
+    assert_eq!(BanterMarketStatus::from_u8(1).unwrap(), BanterMarketStatus::Expired);
+    assert_eq!(BanterMarketStatus::from_u8(2).unwrap(), BanterMarketStatus::Settled);
+
+    // Invalid status byte MUST error (Err(InvalidMarketStatus)) instead of silently defaulting to Active
+    let err = BanterMarketStatus::from_u8(3).unwrap_err();
+    match err {
+        SolanaError::InvalidMarketStatus(b) => assert_eq!(b, 3),
+        other => panic!("Expected InvalidMarketStatus error, got {:?}", other),
+    }
+
+    let err2 = BanterMarketStatus::from_u8(255).unwrap_err();
+    match err2 {
+        SolanaError::InvalidMarketStatus(b) => assert_eq!(b, 255),
+        other => panic!("Expected InvalidMarketStatus error, got {:?}", other),
+    }
 }
 
 #[test]
@@ -128,6 +149,37 @@ fn test_pda_derivation_and_verification() {
 }
 
 #[test]
+fn test_geyser_subscribe_request_builder() {
+    let config = GeyserConfig {
+        endpoint: "http://127.0.0.1:10000".to_string(),
+        x_token: Some("secret_token".to_string()),
+        commitment_confirmed: true,
+        kairo_social_program_id: Some("SocialProg111111111111111111111111111111111".to_string()),
+        kairo_banter_program_id: Some("BanterProg111111111111111111111111111111111".to_string()),
+        reconnect_base_delay_ms: 1000,
+        reconnect_max_delay_ms: 30000,
+    };
+
+    let client = GeyserClient::new(config);
+    let req = client.build_subscribe_request();
+
+    // Verify accounts filter contains protocol owners
+    let acc_filter = req.accounts.get("kairo_program_accounts").expect("Missing accounts filter");
+    assert_eq!(acc_filter.owner.len(), 2);
+    assert!(acc_filter.owner.contains(&"SocialProg111111111111111111111111111111111".to_string()));
+    assert!(acc_filter.owner.contains(&"BanterProg111111111111111111111111111111111".to_string()));
+
+    // Verify transactions filter contains protocol owners in account_include
+    let tx_filter = req.transactions.get("kairo_program_txs").expect("Missing transactions filter");
+    assert_eq!(tx_filter.account_include.len(), 2);
+    assert_eq!(tx_filter.vote, Some(false));
+    assert_eq!(tx_filter.failed, Some(false));
+
+    // Verify commitment level is Confirmed (1)
+    assert_eq!(req.commitment, Some(1));
+}
+
+#[test]
 fn test_banter_bet_log_extraction() {
     let event = BanterBetPlaced {
         market_id: [11u8; 32],
@@ -174,7 +226,11 @@ async fn test_solana_processor_postgres_end_to_end() {
         }
     };
 
-    let processor = SolanaProcessor::new(db.clone(), None);
+    let social_pid = [55u8; 32];
+    let banter_pid = [66u8; 32];
+
+    let processor = SolanaProcessor::new(db.clone(), None)
+        .with_program_ids(Some(social_pid), Some(banter_pid));
     assert_eq!(processor.chain_id(), SOLANA_INTERNAL_CHAIN_ID);
 
     let auth_bytes = [101u8; 32];
@@ -203,7 +259,7 @@ async fn test_solana_processor_postgres_end_to_end() {
         .await
         .ok();
 
-    // 1. Ingest SocialEdge at slot 100
+    // Derive genuine PDAs using protocol formulas
     let edge_v1 = SocialEdge {
         authority: auth_bytes,
         peer: peer_bytes,
@@ -213,7 +269,26 @@ async fn test_solana_processor_postgres_end_to_end() {
         last_updated_slot: 100,
         bump: 255,
     };
-    processor.process_social_edge("unused_pubkey", &edge_v1, 100).await
+    let edge_v1_pda = SocialEdge::derive_pda_address(&social_pid, &auth_bytes, &peer_bytes, edge_v1.bump);
+    let edge_v1_pda_b58 = bs58::encode(&edge_v1_pda).into_string();
+
+    // Test: Missing program ID triggers explicit SolanaError::MissingProgramId
+    let unconfigured_proc = SolanaProcessor::new(db.clone(), None);
+    let missing_pid_err = unconfigured_proc.process_social_edge(&edge_v1_pda_b58, &edge_v1, 100).await.unwrap_err();
+    match missing_pid_err {
+        SolanaError::MissingProgramId(name) => assert_eq!(name, "kairo_social"),
+        other => panic!("Expected MissingProgramId error, got {:?}", other),
+    }
+
+    // Test: Invalid pubkey length triggers explicit SolanaError::InvalidPubkeyLength
+    let short_pubkey_err = processor.process_social_edge("ShortKey123", &edge_v1, 100).await.unwrap_err();
+    match short_pubkey_err {
+        SolanaError::InvalidPubkeyLength { .. } => {}
+        other => panic!("Expected InvalidPubkeyLength error, got {:?}", other),
+    }
+
+    // 1. Ingest SocialEdge at slot 100 with valid PDA
+    processor.process_social_edge(&edge_v1_pda_b58, &edge_v1, 100).await
         .expect("Failed to process social edge v1");
 
     // Verify row in social_edges
@@ -235,7 +310,7 @@ async fn test_solana_processor_postgres_end_to_end() {
         last_updated_slot: 90,
         ..edge_v1.clone()
     };
-    processor.process_social_edge("unused_pubkey", &edge_stale, 90).await
+    processor.process_social_edge(&edge_v1_pda_b58, &edge_stale, 90).await
         .expect("Slot gating execution failed");
 
     let row_stale_check = sqlx::query("SELECT weight_bps, last_updated_slot FROM social_edges WHERE chain_id = $1 AND authority = $2 AND peer = $3")
@@ -256,7 +331,7 @@ async fn test_solana_processor_postgres_end_to_end() {
         last_updated_slot: 120,
         ..edge_v1.clone()
     };
-    processor.process_social_edge("unused_pubkey", &edge_v2, 120).await
+    processor.process_social_edge(&edge_v1_pda_b58, &edge_v2, 120).await
         .expect("Failed to process social edge v2");
 
     let row_v2 = sqlx::query("SELECT ring_tier, weight_bps, last_updated_slot FROM social_edges WHERE chain_id = $1 AND authority = $2 AND peer = $3")
@@ -270,7 +345,7 @@ async fn test_solana_processor_postgres_end_to_end() {
     assert_eq!(row_v2.get::<i32, _>("weight_bps"), 6500);
     assert_eq!(row_v2.get::<i64, _>("last_updated_slot"), 120);
 
-    // 4. Ingest BanterMarket at slot 100
+    // 4. Ingest BanterMarket at slot 100 with valid PDA
     let now = Utc::now();
     let market = BanterMarket {
         curator: auth_bytes,
@@ -283,7 +358,10 @@ async fn test_solana_processor_postgres_end_to_end() {
         created_at_timestamp: now.timestamp(),
         bump: 254,
     };
-    processor.process_banter_market("unused_pubkey", &market, 100, now).await
+    let market_pda = BanterMarket::derive_pda_address(&banter_pid, &auth_bytes, &market_id_bytes, market.bump);
+    let market_pda_b58 = bs58::encode(&market_pda).into_string();
+
+    processor.process_banter_market(&market_pda_b58, &market, 100, now).await
         .expect("Failed to process banter market");
 
     let m_row = sqlx::query("SELECT chain_id, tier, status, pool_address FROM markets WHERE chain_id = $1 AND market_id = $2")
