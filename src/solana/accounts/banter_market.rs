@@ -20,12 +20,12 @@ impl BanterMarketStatus {
         }
     }
 
-    pub fn from_u8(val: u8) -> Self {
+    pub fn from_u8(val: u8) -> Result<Self> {
         match val {
-            0 => BanterMarketStatus::Active,
-            1 => BanterMarketStatus::Expired,
-            2 => BanterMarketStatus::Settled,
-            _ => BanterMarketStatus::Active,
+            0 => Ok(BanterMarketStatus::Active),
+            1 => Ok(BanterMarketStatus::Expired),
+            2 => Ok(BanterMarketStatus::Settled),
+            other => Err(SolanaError::InvalidMarketStatus(other)),
         }
     }
 }

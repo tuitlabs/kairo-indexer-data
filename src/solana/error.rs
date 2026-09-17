@@ -27,6 +27,18 @@ pub enum SolanaError {
     #[error("Invalid ring tier byte: {0}")]
     InvalidTier(u8),
 
+    #[error("Invalid banter market status byte: {0}")]
+    InvalidMarketStatus(u8),
+
+    #[error("Missing expected program ID for PDA verification ({0})")]
+    MissingProgramId(&'static str),
+
+    #[error("Invalid public key length for {address}: expected 32 bytes, got {length}")]
+    InvalidPubkeyLength {
+        address: String,
+        length: usize,
+    },
+
     #[error("Solana event not found in logs: {0}")]
     EventNotFound(String),
 

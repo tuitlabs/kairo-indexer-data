@@ -60,17 +60,22 @@ impl SolanaProcessor {
         edge: &SocialEdge,
         slot: u64,
     ) -> Result<()> {
-        // 1. Verify PDA if program ID is configured
-        if let Some(ref pid) = self.social_program_id {
-            let bytes = bs58::decode(account_pubkey_b58)
-                .into_vec()
-                .map_err(SolanaError::Base58)?;
-            if bytes.len() == 32 {
-                let mut expected_bytes = [0u8; 32];
-                expected_bytes.copy_from_slice(&bytes);
-                edge.verify_pda(&expected_bytes, pid)?;
-            }
+        // 1. Strict PDA verification: must be configured and exactly 32 bytes
+        let pid = self.social_program_id.as_ref().ok_or(
+            SolanaError::MissingProgramId("kairo_social")
+        )?;
+        let bytes = bs58::decode(account_pubkey_b58)
+            .into_vec()
+            .map_err(SolanaError::Base58)?;
+        if bytes.len() != 32 {
+            return Err(SolanaError::InvalidPubkeyLength {
+                address: account_pubkey_b58.to_string(),
+                length: bytes.len(),
+            });
         }
+        let mut expected_bytes = [0u8; 32];
+        expected_bytes.copy_from_slice(&bytes);
+        edge.verify_pda(&expected_bytes, pid)?;
 
         let authority = edge.authority_base58();
         let peer = edge.peer_base58();
@@ -148,16 +153,22 @@ impl SolanaProcessor {
         slot: u64,
         timestamp: DateTime<Utc>,
     ) -> Result<()> {
-        if let Some(ref pid) = self.banter_program_id {
-            let bytes = bs58::decode(account_pubkey_b58)
-                .into_vec()
-                .map_err(SolanaError::Base58)?;
-            if bytes.len() == 32 {
-                let mut expected_bytes = [0u8; 32];
-                expected_bytes.copy_from_slice(&bytes);
-                market.verify_pda(&expected_bytes, pid)?;
-            }
+        // 1. Strict PDA verification: must be configured and exactly 32 bytes
+        let pid = self.banter_program_id.as_ref().ok_or(
+            SolanaError::MissingProgramId("kairo_banter")
+        )?;
+        let bytes = bs58::decode(account_pubkey_b58)
+            .into_vec()
+            .map_err(SolanaError::Base58)?;
+        if bytes.len() != 32 {
+            return Err(SolanaError::InvalidPubkeyLength {
+                address: account_pubkey_b58.to_string(),
+                length: bytes.len(),
+            });
         }
+        let mut expected_bytes = [0u8; 32];
+        expected_bytes.copy_from_slice(&bytes);
+        market.verify_pda(&expected_bytes, pid)?;
 
         let market_id = market.market_id_hex();
         let curator = market.curator_base58();
