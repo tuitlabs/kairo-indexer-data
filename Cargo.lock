@@ -3176,6 +3176,7 @@ dependencies = [
  "tiny-keccak",
  "tokio",
  "tokio-native-tls",
+ "tokio-stream",
  "tonic",
  "yellowstone-grpc-proto",
 ]

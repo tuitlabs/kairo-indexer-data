@@ -187,8 +187,11 @@ impl GeyserClient {
                 let mut client = ProtoGeyserClient::new(channel);
 
                 // 2. Build streaming SubscribeRequest with optional x-token header
-                let req_clone = request.clone();
-                let req_stream = futures_util::stream::once(async move { req_clone });
+                let (req_tx, req_rx) = mpsc::channel(64);
+                let req_stream = tokio_stream::wrappers::ReceiverStream::new(req_rx);
+                if req_tx.send(request.clone()).await.is_err() {
+                    continue;
+                }
 
                 let mut grpc_req = tonic::Request::new(req_stream);
                 if let Some(ref token) = x_token {
@@ -251,8 +254,14 @@ impl GeyserClient {
                                                     }
                                                 }
                                             }
-                                            UpdateOneof::Ping(_) => {
-                                                // Keepalive ping from server
+                                            UpdateOneof::Ping(_ping) => {
+                                                // Keep-alive heartbeat: respond with SubscribeRequestPing
+                                                // over the open bidirectional stream to satisfy proxies/middleboxes
+                                                let ping_req = SubscribeRequest {
+                                                    ping: Some(yellowstone_grpc_proto::geyser::SubscribeRequestPing { id: 1 }),
+                                                    ..Default::default()
+                                                };
+                                                req_tx.send(ping_req).await.ok();
                                             }
                                             _ => {}
                                         }

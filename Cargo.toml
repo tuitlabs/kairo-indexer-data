@@ -29,3 +29,4 @@ borsh = { version = "1.8.1", features = ["derive"] }
 base64 = "0.22.1"
 yellowstone-grpc-proto = "12.7.0"
 tonic = { version = "0.14.6", features = ["transport"] }
+tokio-stream = { version = "0.1.19", features = ["sync"] }
