@@ -1,10 +1,14 @@
 use chrono::Utc;
 use sqlx::Row;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use tokio::sync::mpsc;
 use kairo_indexer_data::db::Database;
 use kairo_indexer_data::solana::{
     SocialEdge, RingTier, BanterMarket, BanterMarketStatus,
-    BanterBetPlaced, SolanaProcessor, GeyserClient, GeyserConfig,
+    BanterBetPlaced, SolanaProcessor, SolanaPipeline,
+    GeyserClient, GeyserConfig, GeyserUpdate,
+    GeyserAccountUpdate, GeyserTransactionUpdate,
     SOLANA_INTERNAL_CHAIN_ID, SolanaError,
 };
 
@@ -460,4 +464,201 @@ async fn test_solana_processor_postgres_end_to_end() {
         .expect("Failed to fetch market svc");
     let svc: bigdecimal::BigDecimal = m_svc_row.get("current_svc");
     assert!(svc >= bigdecimal::BigDecimal::from(0));
+}
+
+#[tokio::test]
+async fn test_solana_pipeline_orchestration_routing() {
+    dotenvy::dotenv().ok();
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/kairo_indexer".to_string());
+
+    let db = match Database::connect(&db_url).await {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("Skipping test_solana_pipeline_orchestration_routing: PostgreSQL not available");
+            return;
+        }
+    };
+
+    let social_pid = [77u8; 32];
+    let banter_pid = [88u8; 32];
+    let social_pid_b58 = bs58::encode(&social_pid).into_string();
+    let banter_pid_b58 = bs58::encode(&banter_pid).into_string();
+
+    let processor = Arc::new(
+        SolanaProcessor::new(db.clone(), None)
+            .with_program_ids(Some(social_pid), Some(banter_pid))
+    );
+    let pipeline = SolanaPipeline::new(
+        processor.clone(),
+        social_pid_b58.clone(),
+        banter_pid_b58.clone(),
+    );
+
+    let auth_bytes = [111u8; 32];
+    let peer_bytes = [112u8; 32];
+    let agent_bytes = [113u8; 32];
+    let market_id_bytes = [114u8; 32];
+    let market_id_hex = format!("0x{}", hex::encode(market_id_bytes));
+    let tx_sig_bytes = [99u8; 64];
+    let tx_sig = bs58::encode(&tx_sig_bytes).into_string();
+
+    // Clean up test data
+    sqlx::query("DELETE FROM agent_trades WHERE chain_id = $1 AND market_id = $2")
+        .bind(SOLANA_INTERNAL_CHAIN_ID as i64)
+        .bind(&market_id_hex)
+        .execute(db.pool())
+        .await
+        .ok();
+    sqlx::query("DELETE FROM markets WHERE chain_id = $1 AND market_id = $2")
+        .bind(SOLANA_INTERNAL_CHAIN_ID as i64)
+        .bind(&market_id_hex)
+        .execute(db.pool())
+        .await
+        .ok();
+    sqlx::query("DELETE FROM social_edges WHERE chain_id = $1 AND authority = $2 AND peer = $3")
+        .bind(SOLANA_INTERNAL_CHAIN_ID as i64)
+        .bind(&bs58::encode(&auth_bytes).into_string())
+        .bind(&bs58::encode(&peer_bytes).into_string())
+        .execute(db.pool())
+        .await
+        .ok();
+
+    // 1. Prepare SocialEdge Account update
+    let edge = SocialEdge {
+        authority: auth_bytes,
+        peer: peer_bytes,
+        ring_tier: RingTier::InnerCircle,
+        weight_bps: 8500,
+        interaction_count: 5,
+        last_updated_slot: 200,
+        bump: 253,
+    };
+    let edge_pda = SocialEdge::derive_pda_address(&social_pid, &auth_bytes, &peer_bytes, edge.bump);
+    let edge_pda_b58 = bs58::encode(&edge_pda).into_string();
+    let edge_data = edge.to_bytes().expect("Failed to serialize edge");
+
+    let edge_update = GeyserUpdate::Account(GeyserAccountUpdate {
+        pubkey: edge_pda_b58.clone(),
+        owner: social_pid_b58.clone(),
+        lamports: 1_000_000,
+        slot: 200,
+        data: edge_data,
+        is_startup: false,
+    });
+
+    // 2. Prepare BanterMarket Account update
+    let market = BanterMarket {
+        curator: auth_bytes,
+        market_id: market_id_bytes,
+        stance_uri: "ipfs://test_stance".to_string(),
+        status: BanterMarketStatus::Active,
+        total_raw_capital: 0,
+        total_effective_stake: 0,
+        created_at_slot: 200,
+        created_at_timestamp: Utc::now().timestamp(),
+        bump: 252,
+    };
+    let market_pda = BanterMarket::derive_pda_address(&banter_pid, &auth_bytes, &market_id_bytes, market.bump);
+    let market_pda_b58 = bs58::encode(&market_pda).into_string();
+    let market_data = market.to_bytes().expect("Failed to serialize market");
+
+    let market_update = GeyserUpdate::Account(GeyserAccountUpdate {
+        pubkey: market_pda_b58.clone(),
+        owner: banter_pid_b58.clone(),
+        lamports: 2_000_000,
+        slot: 200,
+        data: market_data,
+        is_startup: false,
+    });
+
+    // 3. Prepare BanterBetPlaced Transaction update with Anchor log
+    let bet = BanterBetPlaced {
+        market_id: market_id_bytes,
+        agent: agent_bytes,
+        trade_type: 0, // BUY
+        raw_capital: 5000,
+        token_amount: 2500,
+        effective_stake: 4250,
+        credibility_score: 850,
+        execution_price: 2,
+        friction_tax: 15,
+    };
+    let bet_log = bet.to_log_string().expect("Failed to serialize to log string");
+    let tx_update = GeyserUpdate::Transaction(GeyserTransactionUpdate {
+        signature: tx_sig.clone(),
+        slot: 201,
+        is_vote: false,
+        err: None,
+        logs: vec![
+            "Program Banter111111111111111111111111111111111 invoke [1]".to_string(),
+            bet_log,
+            "Program Banter111111111111111111111111111111111 success".to_string(),
+        ],
+    });
+
+    // 4. Prepare Unrelated Account update (should be ignored gracefully)
+    let unrelated_update = GeyserUpdate::Account(GeyserAccountUpdate {
+        pubkey: "UnrelatedPubkey111111111111111111111111111".to_string(),
+        owner: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string(),
+        lamports: 500,
+        slot: 202,
+        data: vec![0u8; 165],
+        is_startup: false,
+    });
+
+    // 5. Prepare Failed Transaction update (should be skipped)
+    let failed_tx = GeyserUpdate::Transaction(GeyserTransactionUpdate {
+        signature: "FailedTxSig111111111111111111111111111111111111111111111111111111111111111111111111111111111".to_string(),
+        slot: 203,
+        is_vote: false,
+        err: Some("InstructionError(0, Custom(6001))".to_string()),
+        logs: vec!["Program failed to complete".to_string()],
+    });
+
+    // Create channel and stream all updates into pipeline
+    let (tx, rx) = mpsc::channel(32);
+    tx.send(edge_update).await.unwrap();
+    tx.send(market_update).await.unwrap();
+    tx.send(tx_update).await.unwrap();
+    tx.send(unrelated_update).await.unwrap();
+    tx.send(failed_tx).await.unwrap();
+    drop(tx); // Close channel to terminate pipeline run loop
+
+    // Run pipeline orchestration loop
+    pipeline.run(rx).await.expect("Pipeline execution failed");
+
+    // Verify social_edges table
+    let edge_row = sqlx::query("SELECT ring_tier, weight_bps, last_updated_slot FROM social_edges WHERE chain_id = $1 AND authority = $2 AND peer = $3")
+        .bind(SOLANA_INTERNAL_CHAIN_ID as i64)
+        .bind(&bs58::encode(&auth_bytes).into_string())
+        .bind(&bs58::encode(&peer_bytes).into_string())
+        .fetch_one(db.pool())
+        .await
+        .expect("Failed to fetch edge row");
+    assert_eq!(edge_row.get::<String, _>("ring_tier"), "INNER_CIRCLE");
+    assert_eq!(edge_row.get::<i32, _>("weight_bps"), 8500);
+    assert_eq!(edge_row.get::<i64, _>("last_updated_slot"), 200);
+
+    // Verify markets table
+    let market_row = sqlx::query("SELECT tier, status FROM markets WHERE chain_id = $1 AND market_id = $2")
+        .bind(SOLANA_INTERNAL_CHAIN_ID as i64)
+        .bind(&market_id_hex)
+        .fetch_one(db.pool())
+        .await
+        .expect("Failed to fetch market row");
+    assert_eq!(market_row.get::<i16, _>("tier"), 3);
+    assert_eq!(market_row.get::<String, _>("status"), "ACTIVE");
+
+    // Verify agent_trades table
+    let trade_row = sqlx::query("SELECT trade_type, credibility_score, effective_stake FROM agent_trades WHERE chain_id = $1 AND market_id = $2 AND tx_hash = $3")
+        .bind(SOLANA_INTERNAL_CHAIN_ID as i64)
+        .bind(&market_id_hex)
+        .bind(&tx_sig)
+        .fetch_one(db.pool())
+        .await
+        .expect("Failed to fetch trade row");
+    assert_eq!(trade_row.get::<String, _>("trade_type"), "BUY");
+    assert_eq!(trade_row.get::<i32, _>("credibility_score"), 850);
+    assert_eq!(trade_row.get::<bigdecimal::BigDecimal, _>("effective_stake"), bigdecimal::BigDecimal::from(4250));
 }

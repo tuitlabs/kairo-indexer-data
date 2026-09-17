@@ -10,4 +10,8 @@ pub use error::{IndexerError, Result};
 pub use config::Config;
 pub use db::Database;
 pub use graph::{Neo4jClient, sync_coalition_graph};
-pub use solana::{SolanaProcessor, SocialEdge, RingTier, BanterMarket, BanterBetPlaced};
+pub use solana::{
+    SolanaProcessor, SolanaPipeline, SocialEdge, RingTier,
+    BanterMarket, BanterMarketStatus, BanterBetPlaced,
+    GeyserClient, GeyserConfig, GeyserUpdate,
+};
