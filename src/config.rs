@@ -33,6 +33,10 @@ pub struct Config {
     pub max_batch_size: u64,
     pub reconnect_base_delay_ms: u64,
     pub reconnect_max_delay_ms: u64,
+    pub solana_rpc_url: String,
+    pub solana_geyser_endpoint: String,
+    pub solana_geyser_x_token: Option<String>,
+    pub solana_programs: crate::solana::config::SolanaProgramsConfig,
 }
 
 impl Config {
@@ -90,6 +94,22 @@ impl Config {
             .ok()
             .map(|s| s.to_lowercase());
 
+        let solana_rpc_url = env::var("SOLANA_RPC_URL")
+            .unwrap_or_else(|_| "https://api.devnet.solana.com".to_string());
+
+        let solana_geyser_endpoint = env::var("SOLANA_GEYSER_ENDPOINT")
+            .unwrap_or_else(|_| "http://127.0.0.1:10000".to_string());
+
+        let solana_geyser_x_token = env::var("SOLANA_GEYSER_X_TOKEN").ok();
+
+        let kairo_social_program_id = env::var("KAIRO_SOCIAL_PROGRAM_ID").ok();
+        let kairo_banter_program_id = env::var("KAIRO_BANTER_PROGRAM_ID").ok();
+
+        let solana_programs = crate::solana::config::SolanaProgramsConfig::new(
+            kairo_social_program_id.as_deref(),
+            kairo_banter_program_id.as_deref(),
+        ).map_err(|e| crate::error::IndexerError::Config(e.to_string()))?;
+
         Ok(Self {
             database_url,
             ws_rpc_url,
@@ -107,6 +127,10 @@ impl Config {
             max_batch_size,
             reconnect_base_delay_ms: 1000,
             reconnect_max_delay_ms: 30000,
+            solana_rpc_url,
+            solana_geyser_endpoint,
+            solana_geyser_x_token,
+            solana_programs,
         })
     }
 

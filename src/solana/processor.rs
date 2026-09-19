@@ -5,6 +5,7 @@ use crate::db::Database;
 use crate::graph::Neo4jClient;
 use crate::solana::accounts::{SocialEdge, BanterMarket, RingTier};
 use crate::solana::instructions::BanterBetPlaced;
+use crate::solana::config::{SolanaProgramId, SolanaProgramsConfig};
 use crate::solana::error::{SolanaError, Result};
 
 pub const SOLANA_INTERNAL_CHAIN_ID: u64 = 101;
@@ -13,8 +14,7 @@ pub struct SolanaProcessor {
     db: Database,
     neo4j: Option<Neo4jClient>,
     chain_id: u64,
-    social_program_id: Option<[u8; 32]>,
-    banter_program_id: Option<[u8; 32]>,
+    programs: SolanaProgramsConfig,
 }
 
 impl SolanaProcessor {
@@ -23,8 +23,7 @@ impl SolanaProcessor {
             db,
             neo4j,
             chain_id: SOLANA_INTERNAL_CHAIN_ID,
-            social_program_id: None,
-            banter_program_id: None,
+            programs: SolanaProgramsConfig::default(),
         }
     }
 
@@ -33,18 +32,39 @@ impl SolanaProcessor {
         self
     }
 
+    pub fn with_programs(mut self, programs: SolanaProgramsConfig) -> Self {
+        self.programs = programs;
+        self
+    }
+
     pub fn with_program_ids(
         mut self,
         social_program_id: Option<[u8; 32]>,
         banter_program_id: Option<[u8; 32]>,
     ) -> Self {
-        self.social_program_id = social_program_id;
-        self.banter_program_id = banter_program_id;
+        self.programs.kairo_social = social_program_id.map(SolanaProgramId::from_bytes);
+        self.programs.kairo_banter = banter_program_id.map(SolanaProgramId::from_bytes);
         self
+    }
+
+    pub fn db(&self) -> &Database {
+        &self.db
     }
 
     pub fn chain_id(&self) -> u64 {
         self.chain_id
+    }
+
+    pub fn programs(&self) -> &SolanaProgramsConfig {
+        &self.programs
+    }
+
+    pub fn social_program_id(&self) -> Option<&SolanaProgramId> {
+        self.programs.kairo_social.as_ref()
+    }
+
+    pub fn banter_program_id(&self) -> Option<&SolanaProgramId> {
+        self.programs.kairo_banter.as_ref()
     }
 
     /// Process a decoded `SocialEdge` account update streamed from Geyser gRPC.
@@ -61,9 +81,9 @@ impl SolanaProcessor {
         slot: u64,
     ) -> Result<()> {
         // 1. Strict PDA verification: must be configured and exactly 32 bytes
-        let pid = self.social_program_id.as_ref().ok_or(
+        let pid = self.programs.kairo_social.as_ref().ok_or(
             SolanaError::MissingProgramId("kairo_social")
-        )?;
+        )?.bytes();
         let bytes = bs58::decode(account_pubkey_b58)
             .into_vec()
             .map_err(SolanaError::Base58)?;
@@ -154,9 +174,9 @@ impl SolanaProcessor {
         timestamp: DateTime<Utc>,
     ) -> Result<()> {
         // 1. Strict PDA verification: must be configured and exactly 32 bytes
-        let pid = self.banter_program_id.as_ref().ok_or(
+        let pid = self.programs.kairo_banter.as_ref().ok_or(
             SolanaError::MissingProgramId("kairo_banter")
-        )?;
+        )?.bytes();
         let bytes = bs58::decode(account_pubkey_b58)
             .into_vec()
             .map_err(SolanaError::Base58)?;
