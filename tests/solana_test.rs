@@ -3,12 +3,14 @@ use sqlx::Row;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use base64::Engine;
 use kairo_indexer_data::db::Database;
 use kairo_indexer_data::solana::{
     SocialEdge, RingTier, BanterMarket, BanterMarketStatus,
     BanterBetPlaced, SolanaProcessor, SolanaPipeline,
     GeyserClient, GeyserConfig, GeyserUpdate,
     GeyserAccountUpdate, GeyserTransactionUpdate,
+    SolanaProgramId, SolanaProgramsConfig, SolanaRpcClient,
     SOLANA_INTERNAL_CHAIN_ID, SolanaError,
 };
 
@@ -489,11 +491,9 @@ async fn test_solana_pipeline_orchestration_routing() {
         SolanaProcessor::new(db.clone(), None)
             .with_program_ids(Some(social_pid), Some(banter_pid))
     );
-    let pipeline = SolanaPipeline::new(
-        processor.clone(),
-        social_pid_b58.clone(),
-        banter_pid_b58.clone(),
-    );
+    let pipeline = SolanaPipeline::new(processor.clone());
+    assert_eq!(pipeline.social_program_id(), Some(social_pid_b58.as_str()));
+    assert_eq!(pipeline.banter_program_id(), Some(banter_pid_b58.as_str()));
 
     let auth_bytes = [111u8; 32];
     let peer_bytes = [112u8; 32];
@@ -661,4 +661,165 @@ async fn test_solana_pipeline_orchestration_routing() {
     assert_eq!(trade_row.get::<String, _>("trade_type"), "BUY");
     assert_eq!(trade_row.get::<i32, _>("credibility_score"), 850);
     assert_eq!(trade_row.get::<bigdecimal::BigDecimal, _>("effective_stake"), bigdecimal::BigDecimal::from(4250));
+
+    // Verify indexer_sync_state table for Solana (chain_id = 101)
+    let sync_slot = db.get_last_indexed_block(SOLANA_INTERNAL_CHAIN_ID).await
+        .expect("Failed to get sync slot")
+        .expect("Missing sync slot row");
+    assert_eq!(sync_slot, 203);
+    assert_eq!(pipeline.last_synced_slot(), 203);
+}
+
+#[test]
+fn test_solana_programs_config_unified_shared_source() {
+    let raw_social_b58 = bs58::encode(&[77u8; 32]).into_string();
+    let raw_banter_b58 = bs58::encode(&[88u8; 32]).into_string();
+
+    let config = SolanaProgramsConfig::new(
+        Some(&raw_social_b58),
+        Some(&raw_banter_b58),
+    ).expect("Failed to parse valid program IDs");
+
+    let social = config.kairo_social.as_ref().unwrap();
+    let banter = config.kairo_banter.as_ref().unwrap();
+
+    // Verify string representation matches exactly
+    assert_eq!(social.as_str(), raw_social_b58.as_str());
+    assert_eq!(banter.as_str(), raw_banter_b58.as_str());
+    assert_eq!(SolanaProgramId::from_base58(&raw_social_b58).unwrap(), *social);
+
+    // Verify byte representation is exactly 32 bytes and round-trips
+    assert_eq!(social.bytes().len(), 32);
+    assert_eq!(banter.bytes().len(), 32);
+    assert_eq!(bs58::encode(social.bytes()).into_string(), raw_social_b58);
+    assert_eq!(bs58::encode(banter.bytes()).into_string(), raw_banter_b58);
+
+    // Test rejection of invalid pubkeys
+    assert!(SolanaProgramsConfig::new(Some("InvalidShortPubkey"), None).is_err());
+    assert!(SolanaProgramsConfig::new(None, Some("InvalidBase58Pubkey!#@%")).is_err());
+}
+
+#[test]
+fn test_solana_rpc_client_program_accounts_parsing() {
+    let mock_pubkey = "AccountPubkey11111111111111111111111111111111";
+    let mock_owner = "Program111111111111111111111111111111111111";
+    let raw_bytes = vec![1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    let b64 = base64::prelude::BASE64_STANDARD.encode(&raw_bytes);
+
+    let json_with_context = serde_json::json!({
+        "jsonrpc": "2.0",
+        "result": {
+            "context": {
+                "slot": 456789
+            },
+            "value": [
+                {
+                    "pubkey": mock_pubkey,
+                    "account": {
+                        "data": [b64, "base64"],
+                        "executable": false,
+                        "lamports": 5000000,
+                        "owner": mock_owner,
+                        "rentEpoch": 0
+                    }
+                }
+            ]
+        },
+        "id": 1
+    });
+
+    let parsed = SolanaRpcClient::parse_program_accounts_response(&json_with_context, 100)
+        .expect("Failed to parse getProgramAccounts response withContext");
+
+    assert_eq!(parsed.slot, 456789);
+    assert_eq!(parsed.accounts.len(), 1);
+    assert_eq!(parsed.accounts[0].pubkey, mock_pubkey);
+    assert_eq!(parsed.accounts[0].owner, mock_owner);
+    assert_eq!(parsed.accounts[0].lamports, 5000000);
+    assert_eq!(parsed.accounts[0].data, raw_bytes);
+}
+
+#[tokio::test]
+async fn test_solana_pipeline_backfill_snapshot_and_sync_state() {
+    dotenvy::dotenv().ok();
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/kairo_indexer".to_string());
+
+    let db = match Database::connect(&db_url).await {
+        Ok(d) => d,
+        Err(_) => {
+            eprintln!("Skipping test_solana_pipeline_backfill_snapshot_and_sync_state: PostgreSQL not available");
+            return;
+        }
+    };
+
+    let social_pid = [33u8; 32];
+    let banter_pid = [44u8; 32];
+    let social_pid_b58 = bs58::encode(&social_pid).into_string();
+    let banter_pid_b58 = bs58::encode(&banter_pid).into_string();
+
+    let programs = SolanaProgramsConfig::new(
+        Some(&social_pid_b58),
+        Some(&banter_pid_b58),
+    ).unwrap();
+
+    let processor = Arc::new(
+        SolanaProcessor::new(db.clone(), None)
+            .with_programs(programs)
+    );
+    let pipeline = SolanaPipeline::new(processor.clone());
+
+    // Clean up sync state and test entities
+    let test_chain_id = SOLANA_INTERNAL_CHAIN_ID;
+    sqlx::query("DELETE FROM indexer_sync_state WHERE chain_id = $1")
+        .bind(test_chain_id as i64)
+        .execute(db.pool())
+        .await
+        .ok();
+
+    // Verify initial cold start: indexer_sync_state has no entry
+    let initial_cursor = db.get_last_indexed_block(test_chain_id).await.unwrap();
+    assert_eq!(initial_cursor, None);
+
+    // Simulate backfill processing by creating snapshot items
+    let auth = [51u8; 32];
+    let peer = [52u8; 32];
+    let edge = SocialEdge {
+        authority: auth,
+        peer,
+        ring_tier: RingTier::SocialRing,
+        weight_bps: 6000,
+        interaction_count: 2,
+        last_updated_slot: 350,
+        bump: 251,
+    };
+    let edge_pda = SocialEdge::derive_pda_address(&social_pid, &auth, &peer, edge.bump);
+    let edge_pda_b58 = bs58::encode(&edge_pda).into_string();
+    let edge_bytes = edge.to_bytes().unwrap();
+
+    // Process snapshot account as backfill would
+    processor.process_social_edge(&edge_pda_b58, &edge, 350).await.unwrap();
+
+    // Advance sync state as backfill does at snapshot slot 350
+    pipeline.record_sync_slot(350).await.unwrap();
+
+    // Check indexer_sync_state recorded slot 350
+    let recorded_slot = db.get_last_indexed_block(test_chain_id).await.unwrap();
+    assert_eq!(recorded_slot, Some(350));
+    assert_eq!(pipeline.last_synced_slot(), 350);
+
+    // Live update at slot 351 advances indexer_sync_state
+    let live_update = GeyserUpdate::Account(GeyserAccountUpdate {
+        pubkey: edge_pda_b58.clone(),
+        owner: social_pid_b58.clone(),
+        lamports: 1_000_000,
+        slot: 351,
+        data: edge_bytes,
+        is_startup: false,
+    });
+    pipeline.process_update(live_update).await.unwrap();
+
+    let advanced_slot = db.get_last_indexed_block(test_chain_id).await.unwrap();
+    assert_eq!(advanced_slot, Some(351));
+    assert_eq!(pipeline.last_synced_slot(), 351);
 }

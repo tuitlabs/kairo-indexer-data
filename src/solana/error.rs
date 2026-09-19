@@ -54,6 +54,9 @@ pub enum SolanaError {
     #[error("Geyser streaming error: {0}")]
     Geyser(String),
 
+    #[error("Solana RPC error: {0}")]
+    Rpc(String),
+
     #[error("Configuration error: {0}")]
     Config(String),
 }

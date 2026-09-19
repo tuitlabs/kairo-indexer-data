@@ -14,4 +14,5 @@ pub use solana::{
     SolanaProcessor, SolanaPipeline, SocialEdge, RingTier,
     BanterMarket, BanterMarketStatus, BanterBetPlaced,
     GeyserClient, GeyserConfig, GeyserUpdate,
+    SolanaProgramId, SolanaProgramsConfig, SolanaRpcClient,
 };

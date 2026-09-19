@@ -3,6 +3,8 @@ pub mod config;
 pub mod abi;
 pub mod db;
 pub mod ingestion;
+pub mod graph;
+pub mod solana;
 
 use std::time::Duration;
 use futures_util::StreamExt;
